@@ -114,7 +114,7 @@ function layout({ title, desc, canonical, body, og, type = 'website', jsonld, no
 <link rel="icon" href="/assets/favicon.ico" sizes="any"><link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32.png"><link rel="icon" type="image/png" sizes="192x192" href="/assets/favicon-192.png"><link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Nastaliq+Urdu:wght@400;700&family=Spectral:ital,wght@0,300;0,400;0,500;1,400&display=swap" rel="stylesheet">
-<link rel="stylesheet" href="/assets/site.css?v=3"><link rel="alternate" type="application/rss+xml" title="Ramz E Zindagi — Roz ka sher" href="/feed.xml">
+<link rel="stylesheet" href="/assets/site.css?v=4"><link rel="alternate" type="application/rss+xml" title="Ramz E Zindagi — Roz ka sher" href="/feed.xml">
 ${jsonld ? `<script type="application/ld+json">${JSON.stringify(jsonld)}</script>` : ''}${extra}</head>
 <body><header class="hdr"><div class="wrap"><a class="brand" href="/"><img src="/assets/favicon-192.png" alt="" width="34" height="34"><span><b>رمزِ زندگی</b><small>Ramz E Zindagi</small></span></a>
 <nav class="nav" aria-label="Main">${nav.map(([h, l]) => `<a href="${h}"${current === h ? ' aria-current="page"' : ''}>${l}</a>`).join('')}<a class="srch" href="/search">Search</a></nav>
@@ -123,7 +123,7 @@ ${jsonld ? `<script type="application/ld+json">${JSON.stringify(jsonld)}</script
 <footer><div class="wrap"><div><span class="u">رمزِ زندگی</span><div>Urdu poetry, dil se dil tak.</div></div>
 <nav><a href="/shayar">Shayar</a><a href="/mauzu">Mauzu</a><a href="/daily">Roz ka sher</a><a href="/ramz">Ramz ki posts</a><a href="/search">Search</a><a href="${IG}" rel="noopener">Instagram</a><a href="https://www.youtube.com/@ramz.e.zindagi" rel="noopener">YouTube</a><a href="https://www.tiktok.com/@ramz.e.zindagi" rel="noopener">TikTok</a><a href="https://www.facebook.com/profile.php?id=61596536855182" rel="noopener">Facebook</a></nav>
 <p>Classical kalaam un shayar ka hai jin ka intiqaal 50 saal se zyada pehle hua (public domain). Ramz E Zindagi ki apni lines © Ramz E Zindagi. Kisi ghalti ki nishandahi ke liye: ramz.e.zindagi@gmail.com</p></div></footer>
-<script src="/assets/site.js?v=3" defer></script></body></html>`;
+<script src="/assets/site.js?v=4" defer></script></body></html>`;
 }
 const crumbs = (items) => `<nav class="crumbs" aria-label="Breadcrumb">${items.map(([h, l], i) => (h ? `<a href="${h}">${esc(l)}</a>` : `<span>${esc(l)}</span>`) + (i < items.length - 1 ? ' <span>›</span>' : '')).join(' ')}</nav>`;
 const crumbLd = (items) => ({ '@context': 'https://schema.org', '@type': 'BreadcrumbList', itemListElement: items.map(([h, l], i) => ({ '@type': 'ListItem', position: i + 1, name: l, item: h ? SITE + h : undefined })) });
