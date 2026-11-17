@@ -111,12 +111,12 @@ function layout({ title, desc, canonical, body, og, type = 'website', jsonld, no
 <link rel="canonical" href="${esc(canonical || SITE + '/')}"><meta name="theme-color" content="#0B0F1C">
 <meta property="og:site_name" content="Ramz E Zindagi"><meta property="og:type" content="${type}"><meta property="og:title" content="${esc(t)}"><meta property="og:description" content="${esc(d)}"><meta property="og:url" content="${esc(canonical || SITE + '/')}"><meta property="og:image" content="${esc(og || SITE + '/assets/og.jpg')}"><meta property="og:locale" content="ur_PK">
 <meta name="twitter:card" content="summary_large_image"><meta name="twitter:title" content="${esc(t)}"><meta name="twitter:description" content="${esc(d)}"><meta name="twitter:image" content="${esc(og || SITE + '/assets/og.jpg')}">
-<link rel="icon" href="/assets/favicon.ico" sizes="any"><link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32.png"><link rel="icon" type="image/png" sizes="192x192" href="/assets/favicon-192.png"><link rel="apple-touch-icon" href="/assets/apple-touch-icon.png">
+<link rel="icon" href="/assets/favicon.ico?v=5" sizes="any"><link rel="icon" type="image/png" sizes="32x32" href="/assets/favicon-32.png?v=5"><link rel="icon" type="image/png" sizes="192x192" href="/assets/favicon-192.png?v=5"><link rel="apple-touch-icon" href="/assets/apple-touch-icon.png?v=5">
 <link rel="preconnect" href="https://fonts.googleapis.com"><link rel="preconnect" href="https://fonts.gstatic.com" crossorigin>
 <link href="https://fonts.googleapis.com/css2?family=Noto+Nastaliq+Urdu:wght@400;700&family=Spectral:ital,wght@0,300;0,400;0,500;1,400&display=swap" rel="stylesheet">
 <link rel="stylesheet" href="/assets/site.css?v=5"><link rel="alternate" type="application/rss+xml" title="Ramz E Zindagi — Roz ka sher" href="/feed.xml">
 ${jsonld ? `<script type="application/ld+json">${JSON.stringify(jsonld)}</script>` : ''}${extra}</head>
-<body><header class="hdr"><div class="wrap"><a class="brand" href="/"><img src="/assets/favicon-192.png" alt="" width="34" height="34"><span><b>رمزِ زندگی</b><small>Ramz E Zindagi</small></span></a>
+<body><header class="hdr"><div class="wrap"><a class="brand" href="/"><img src="/assets/favicon-192.png?v=5" alt="" width="34" height="34"><span><b>رمزِ زندگی</b><small>Ramz E Zindagi</small></span></a>
 <nav class="nav" aria-label="Main">${nav.map(([h, l]) => `<a href="${h}"${current === h ? ' aria-current="page"' : ''}>${l}</a>`).join('')}<a class="srch" href="/search">Search</a></nav>
 <button class="burger" aria-label="Menu"><span></span></button></div></header>
 <main>${body}</main>
@@ -152,7 +152,7 @@ async function homePage(env, o) {
   const dayN = Math.floor(Date.now() / 864e5);
   const pick = todays ? kvCard(todays, poets, true) : (() => { const p = posts[dayN % posts.length]; return sherCard({ id: 'post-' + p.date, lines: p.ur, ro: p.ro, poet: p.poet, poets, url: '/ramz/' + p.slug, big: true, extra: `<time datetime="${today()}">Aaj ka sher · ${fmtDate(today())}</time>` }); })();
   const body = `
-<section class="hero"><picture><source media="(max-width:760px)" srcset="/assets/hero-m.webp"><source srcset="/assets/hero.webp" type="image/webp"><img src="/assets/hero.jpg" alt="Ramz E Zindagi — shawl odhe ek shakhs ka saya, raat ke rang mein" width="1920" height="1080" fetchpriority="high"></picture>
+<section class="hero"><picture><source media="(max-width:760px)" srcset="/assets/hero-m.webp?v=5"><source srcset="/assets/hero.webp?v=5" type="image/webp"><img src="/assets/hero.jpg?v=5" alt="Ramz E Zindagi — shawl odhe ek shakhs ka saya, raat ke rang mein" width="1920" height="1080" fetchpriority="high"></picture>
 <div class="wrap"><p class="kicker">Urdu poetry · Ghazal · Ashaar</p><h1>رمزِ زندگی</h1><p class="tag">روز و شب کی خاموش، اَن کہی رفاقت</p>
 <p class="en">Ghalib se Iqbal tak — ${total.toLocaleString('en')} se zyada ashaar, mauzu ke hisaab se. Jo dil kehna chahta hai, woh yahan likha mil jayega.</p>
 <form class="sbox" action="/search" role="search"><input name="q" placeholder="Lafz ya sher talaash karein — دل، تنہائی, yaad…" aria-label="Search" autocomplete="off"><button type="submit">Talaash</button></form>
