@@ -220,3 +220,15 @@ footer p{width:100%;font-size:.78rem;line-height:1.6}
 @media(max-width:480px){.row{grid-template-columns:1fr}.row .t{white-space:normal}.hero .stats b{font-size:1.25rem}.ph h1.en{font-size:1.4rem}}
 .sher .ur a{overflow-wrap:anywhere}
 .ghz .sh-item{position:relative}
+
+/* WhatsApp channel + YouTube CTAs (Nov 2026) */
+.nav .hcta{display:inline-flex;align-items:center;gap:6px;border:1px solid var(--line);color:var(--ivory);margin-left:4px}
+.nav .hcta svg{width:15px;height:15px;fill:currentColor}
+.nav .hcta.wa{background:var(--moon);color:#1a1405;border-color:var(--moon);font-weight:500}
+.nav .hcta.wa:hover{background:#e6c47e;color:#1a1405}
+.btn svg{width:17px;height:17px;fill:currentColor}
+.chband{padding:8px 0 40px}
+.chb{display:flex;align-items:center;justify-content:space-between;gap:20px;flex-wrap:wrap;border:1px solid var(--line);border-radius:18px;padding:22px 26px;background:linear-gradient(135deg,rgba(214,178,108,.08),rgba(22,28,51,.6))}
+.chb .u{font-size:1.35rem;color:var(--moon);line-height:2}
+.chb p{color:var(--smoke);font-size:.98rem}
+@media(max-width:860px){.nav .hcta{margin-left:0;justify-content:center}.chb{flex-direction:column;align-items:stretch;text-align:center}.chb .u{text-align:center}.chb .btns{justify-content:center}}
