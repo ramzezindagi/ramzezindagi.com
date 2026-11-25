@@ -7,7 +7,7 @@ const COOKIE = 'ramz_admin';
 const SESSION_DAYS = 14;
 const PAGE_GHAZALS = 30; // = one data shard
 const IG = 'https://www.instagram.com/ramz.e.zindagi';
-const WA_CH = 'https://whatsapp.com/channel/0029VbE9lrA4SpkQR2SlAx0k';
+const WA_CH = 'https://whatsapp.com/channel/0029Vb8qSo35q08iEvVaBK1j';
 const YT_SUB = 'https://www.youtube.com/@ramz.e.zindagi?sub_confirmation=1';
 
 const json = (data, status = 200, extra = {}) =>
