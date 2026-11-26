@@ -515,6 +515,19 @@ async function api(req, env, path, url, ctx) {
     return json({ ok: true, user: auth.user });
   }
 
+  // First-time setup without the old password: a logged-in admin asks for a one-time token (15 min),
+  // then /api/admin/setup sets the username + password with it. Works only while no login exists yet.
+  if (path === '/api/admin/setup' && method === 'POST') {
+    if (auth) return json({ error: 'Login is already set up.' }, 400);
+    const t = await env.RAMZ_KV.get('setup', 'json');
+    if (!t || t.exp < Date.now() || !safeEqual(await sha('setup|' + clean(body.token, 100)), t.hash)) return json({ error: 'Bad or expired setup token.' }, 400);
+    const user = clean(body.username, 40);
+    if (!okUser(user)) return json({ error: 'Username: 3–40 letters, numbers, dot, dash or underscore.' }, 400);
+    if (!okPass(body.password)) return json({ error: 'The new password needs at least 8 characters.' }, 400);
+    await env.RAMZ_KV.put('auth', JSON.stringify({ ...(await makeAuth(user, body.password)), legacyOff: false }));
+    await env.RAMZ_KV.delete('setup');
+    return json({ ok: true, user });
+  }
   if (!(await isAdmin(req, env, ctx))) return json({ error: 'Please log in.' }, 401);
 
   if (path === '/api/admin/account' && method === 'POST') {
@@ -538,6 +551,12 @@ async function api(req, env, path, url, ctx) {
     next.email = clean(body.email, 120) || DEFAULTS.email; if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(next.email)) return json({ error: 'Please write a valid email.' }, 400);
     await env.RAMZ_KV.put('settings', JSON.stringify(next)); setAt = 0;
     return json({ ok: true, settings: next });
+  }
+  if (path === '/api/admin/setup-token' && method === 'POST') {
+    if (auth) return json({ error: 'Login is already set up.' }, 400);
+    const token = randHex(24);
+    await env.RAMZ_KV.put('setup', JSON.stringify({ hash: await sha('setup|' + token), exp: Date.now() + 15 * 60e3 }), { expirationTtl: 900 });
+    return json({ ok: true, token });
   }
   if (path === '/api/admin/mailer' && method === 'POST') {
     const u = clean(body.url, 300);
