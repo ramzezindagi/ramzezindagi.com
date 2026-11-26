@@ -1,14 +1,28 @@
 // Ramz E Zindagi — ramzezindagi.com (Cloudflare Pages, advanced mode)
 // Poetry library (public-domain poets + Ramz's own lines) rendered on the server for SEO.
-// Bindings: RAMZ_KV (daily poems), ADMIN_PASSWORD (admin login at /admin).
+// Bindings: RAMZ_KV (daily poems, settings, admin login), ADMIN_PASSWORD (first-time setup + SSO secret only).
 
 const SITE = 'https://ramzezindagi.com';
 const COOKIE = 'ramz_admin';
-const SESSION_DAYS = 14;
+const REMEMBER_DAYS = 30; // "Remember me" sessions
+const SHORT_HOURS = 12;   // not remembered: browser-session cookie, server expiry 12 h (renewed while in use)
 const PAGE_GHAZALS = 30; // = one data shard
-const IG = 'https://www.instagram.com/ramz.e.zindagi';
-const WA_CH = 'https://whatsapp.com/channel/0029Vb8qSo35q08iEvVaBK1j';
-const YT_SUB = 'https://www.youtube.com/@ramz.e.zindagi?sub_confirmation=1';
+// Site links: defaults below, editable in /admin → Site settings (KV key "settings").
+const DEFAULTS = {
+  wa: 'https://whatsapp.com/channel/0029Vb8qSo35q08iEvVaBK1j',
+  ig: 'https://www.instagram.com/ramz.e.zindagi',
+  yt: 'https://www.youtube.com/@ramz.e.zindagi',
+  tt: 'https://www.tiktok.com/@ramz.e.zindagi',
+  fb: 'https://www.facebook.com/profile.php?id=61596536855182',
+  email: 'ramz.e.zindagi@gmail.com',
+};
+let IG = DEFAULTS.ig, WA_CH = DEFAULTS.wa, YT = DEFAULTS.yt, YT_SUB = DEFAULTS.yt + '?sub_confirmation=1', TT = DEFAULTS.tt, FB = DEFAULTS.fb, MAIL = DEFAULTS.email;
+let setAt = 0;
+async function loadSettings(env) {
+  if (Date.now() - setAt < 30e3 || !env.RAMZ_KV) return;
+  const v = { ...DEFAULTS, ...((await env.RAMZ_KV.get('settings', 'json').catch(() => null)) || {}) };
+  IG = v.ig; WA_CH = v.wa; YT = v.yt; YT_SUB = v.yt + (v.yt.includes('?') ? '&' : '?') + 'sub_confirmation=1'; TT = v.tt; FB = v.fb; MAIL = v.email; setAt = Date.now();
+}
 
 const json = (data, status = 200, extra = {}) =>
   new Response(JSON.stringify(data), { status, headers: { 'content-type': 'application/json; charset=utf-8', 'cache-control': 'no-store', ...extra } });
@@ -20,26 +34,73 @@ const clean = (v, max = 600) => String(v == null ? '' : v).trim().slice(0, max);
 const uid = () => Date.now().toString(36) + Math.random().toString(36).slice(2, 8);
 
 /* ---------- auth (admin) ---------- */
+// Login = username + password. Password kept only as a PBKDF2-SHA256 hash in KV ("auth").
+// Sessions = random tokens; KV keeps only their SHA-256 ("sess:<hash>") with an expiry.
+// 5 wrong tries -> locked 15 min. "Forgot password" mails a 6-digit code (15 min) via a small Apps Script mailer.
 const enc = new TextEncoder();
+const SCOOKIE = 'ramz_sess';
+const PBKDF2_ITER = 100000;
+const MAX_FAILS = 5, LOCK_MIN = 15, CODE_MIN = 15;
+const LEGACY_UNTIL = Date.UTC(2026, 11, 12); // old 14-day cookies (set before the new login) stop working on 12 Dec 2026
+const hex = (buf) => [...new Uint8Array(buf)].map((b) => b.toString(16).padStart(2, '0')).join('');
 async function hmac(secret, msg) {
   const key = await crypto.subtle.importKey('raw', enc.encode(secret), { name: 'HMAC', hash: 'SHA-256' }, false, ['sign']);
-  const sig = await crypto.subtle.sign('HMAC', key, enc.encode(msg));
-  return [...new Uint8Array(sig)].map((b) => b.toString(16).padStart(2, '0')).join('');
+  return hex(await crypto.subtle.sign('HMAC', key, enc.encode(msg)));
 }
 function safeEqual(a, b) {
   if (typeof a !== 'string' || typeof b !== 'string' || a.length !== b.length) return false;
   let r = 0; for (let i = 0; i < a.length; i++) r |= a.charCodeAt(i) ^ b.charCodeAt(i); return r === 0;
 }
-async function makeToken(env) { const exp = Date.now() + SESSION_DAYS * 864e5; return `${exp}.${await hmac(env.ADMIN_PASSWORD, 'ramz|' + exp)}`; }
-async function isAdmin(req, env) {
-  if (!env.ADMIN_PASSWORD) return false;
-  const m = (req.headers.get('cookie') || '').match(new RegExp('(?:^|;\\s*)' + COOKIE + '=([^;]+)'));
-  if (!m) return false;
-  const [exp, sig] = m[1].split('.');
-  if (!exp || !sig || +exp < Date.now()) return false;
+const sha = async (s) => hex(await crypto.subtle.digest('SHA-256', enc.encode(s)));
+const randHex = (n) => hex(crypto.getRandomValues(new Uint8Array(n)));
+async function pwHash(password, saltHex, iter = PBKDF2_ITER) {
+  const key = await crypto.subtle.importKey('raw', enc.encode(password), 'PBKDF2', false, ['deriveBits']);
+  const salt = new Uint8Array(saltHex.match(/../g).map((h) => parseInt(h, 16)));
+  return hex(await crypto.subtle.deriveBits({ name: 'PBKDF2', hash: 'SHA-256', salt, iterations: iter }, key, 256));
+}
+async function makeAuth(user, password) { const salt = randHex(16); return { user, salt, iter: PBKDF2_ITER, hash: await pwHash(password, salt), updated: new Date().toISOString() }; }
+const getAuth = (env) => env.RAMZ_KV.get('auth', 'json');
+async function checkPassword(env, auth, password) {
+  if (auth) return safeEqual(await pwHash(String(password || ''), auth.salt, auth.iter || PBKDF2_ITER), auth.hash);
+  return !!env.ADMIN_PASSWORD && safeEqual(String(password || ''), env.ADMIN_PASSWORD); // first-time setup only
+}
+const readCookie = (req, name) => { const m = (req.headers.get('cookie') || '').match(new RegExp('(?:^|;\\s*)' + name + '=([^;]+)')); return m ? m[1] : ''; };
+const sessCookie = (token, remember) => `${SCOOKIE}=${token}; Path=/; HttpOnly; Secure; SameSite=Strict${remember ? '; Max-Age=' + REMEMBER_DAYS * 86400 : ''}`;
+const clearCookies = [`${SCOOKIE}=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`, `ramz_admin=; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=0`];
+async function newSession(env, remember) {
+  const token = randHex(32); const ttl = remember ? REMEMBER_DAYS * 86400 : SHORT_HOURS * 3600;
+  await env.RAMZ_KV.put('sess:' + (await sha(token)), JSON.stringify({ remember: !!remember, exp: Date.now() + ttl * 1000, seen: Date.now() }), { expirationTtl: ttl });
+  return sessCookie(token, remember);
+}
+// Old cookie format (before 27 Nov 2026): "<exp>.<hmac(ADMIN_PASSWORD)>". Accepted until LEGACY_UNTIL or until the password is changed, then swapped for a new session.
+async function legacyOk(req, env, auth) {
+  const v = readCookie(req, 'ramz_admin'); if (!v || !env.ADMIN_PASSWORD || Date.now() > LEGACY_UNTIL || (auth && auth.legacyOff)) return false;
+  const [exp, sig] = v.split('.'); if (!exp || !sig || +exp < Date.now()) return false;
   return safeEqual(sig, await hmac(env.ADMIN_PASSWORD, 'ramz|' + exp));
 }
-const cookie = (v, maxAge) => `${COOKIE}=${v}; Path=/; HttpOnly; Secure; SameSite=Strict; Max-Age=${maxAge}`;
+async function isAdmin(req, env, ctx) {
+  if (!env.RAMZ_KV) return false;
+  const token = readCookie(req, SCOOKIE);
+  if (token && /^[0-9a-f]{64}$/.test(token)) {
+    const key = 'sess:' + (await sha(token)); const s = await env.RAMZ_KV.get(key, 'json');
+    if (s && s.exp > Date.now()) {
+      // keep active sessions alive (sliding expiry), at most one write per hour
+      if (ctx && Date.now() - (s.seen || 0) > 3600e3) {
+        const ttl = s.remember ? REMEMBER_DAYS * 86400 : SHORT_HOURS * 3600;
+        await env.RAMZ_KV.put(key, JSON.stringify({ ...s, exp: Date.now() + ttl * 1000, seen: Date.now() }), { expirationTtl: ttl });
+        if (s.remember) ctx.cookies.push(sessCookie(token, true));
+      }
+      return true;
+    }
+  }
+  if (await legacyOk(req, env, await getAuth(env))) { if (ctx) { ctx.cookies.push(await newSession(env, true)); ctx.cookies.push(clearCookies[1]); } return true; }
+  return false;
+}
+async function dropSessions(env, keepToken) {
+  const keep = keepToken ? 'sess:' + (await sha(keepToken)) : '';
+  let cursor;
+  do { const r = await env.RAMZ_KV.list({ prefix: 'sess:', cursor }); for (const k of r.keys) if (k.name !== keep) await env.RAMZ_KV.delete(k.name); cursor = r.list_complete ? null : r.cursor; } while (cursor);
+}
 async function ssoOk(url, env) {
   const t = url.searchParams.get('sso');
   if (!t || !env.ADMIN_PASSWORD) return false;
@@ -47,6 +108,12 @@ async function ssoOk(url, env) {
   if (!exp || !sig || +exp < now || +exp > now + 120e3) return false;
   return safeEqual(sig, await hmac(env.ADMIN_PASSWORD, 'sso|ramz|' + exp));
 }
+async function sendCode(env, code) {
+  const m = await env.RAMZ_KV.get('mailer', 'json'); if (!m || !m.url) return false;
+  const r = await fetch(m.url, { method: 'POST', headers: { 'content-type': 'text/plain;charset=utf-8' }, body: JSON.stringify({ code, mins: CODE_MIN }), redirect: 'follow' }).catch(() => null);
+  if (!r) return false; const j = await r.json().catch(() => ({})); return !!j.ok;
+}
+const maskEmail = (e) => String(e).replace(/^(.)(.*)(.@.*)$/, (_, a, b, c) => a + '*'.repeat(Math.min(b.length, 8)) + c);
 
 /* ---------- KV daily poems ---------- */
 async function loadKV(env) { if (!env.RAMZ_KV) return []; const d = await env.RAMZ_KV.get('poems', 'json'); return Array.isArray(d) ? d : []; }
@@ -124,8 +191,8 @@ ${jsonld ? `<script type="application/ld+json">${JSON.stringify(jsonld)}</script
 <main>${body}</main>
 <section class="chband"><div class="wrap"><div class="chb"><div><div class="u">ایسے اور شعر، روز</div><p>Aise aur sher roz WhatsApp channel pe. Poori ghazlein YouTube pe.</p></div><div class="btns"><a class="btn gold" href="${WA_CH}" rel="noopener" target="_blank"><svg viewBox="0 0 24 24"><path d="M12 2a9.9 9.9 0 0 0-8.5 15l-1.4 5 5.2-1.4A10 10 0 1 0 12 2Zm0 18.2c-1.5 0-3-.4-4.3-1.2l-.3-.2-3.1.8.8-3-.2-.3A8.2 8.2 0 1 1 12 20.2Z"/></svg>WhatsApp channel join karein</a><a class="btn" href="${YT_SUB}" rel="noopener" target="_blank"><svg viewBox="0 0 24 24"><path d="M22 8.2a3 3 0 0 0-2.1-2.1C18 5.6 12 5.6 12 5.6s-6 0-7.9.5A3 3 0 0 0 2 8.2 31 31 0 0 0 1.6 12 31 31 0 0 0 2 15.8a3 3 0 0 0 2.1 2.1c1.9.5 7.9.5 7.9.5s6 0 7.9-.5a3 3 0 0 0 2.1-2.1 31 31 0 0 0 .4-3.8 31 31 0 0 0-.4-3.8zM10 15V9l5.2 3L10 15z"/></svg>YouTube</a></div></div></div></section>
 <footer><div class="wrap"><div><span class="u">رمزِ زندگی</span><div>Urdu poetry, dil se dil tak.</div></div>
-<nav><a href="/shayar">Shayar</a><a href="/mauzu">Mauzu</a><a href="/daily">Roz ka sher</a><a href="/ramz">Ramz ki posts</a><a href="/search">Search</a><a href="${WA_CH}" rel="noopener">WhatsApp channel</a><a href="https://www.youtube.com/@ramz.e.zindagi" rel="noopener">YouTube</a><a href="${IG}" rel="noopener">Instagram</a><a href="https://www.tiktok.com/@ramz.e.zindagi" rel="noopener">TikTok</a><a href="https://www.facebook.com/profile.php?id=61596536855182" rel="noopener">Facebook</a></nav>
-<p>Classical kalaam un shayar ka hai jin ka intiqaal 50 saal se zyada pehle hua (public domain). Ramz E Zindagi ki apni lines © Ramz E Zindagi. Kisi ghalti ki nishandahi ke liye: ramz.e.zindagi@gmail.com</p></div></footer>
+<nav><a href="/shayar">Shayar</a><a href="/mauzu">Mauzu</a><a href="/daily">Roz ka sher</a><a href="/ramz">Ramz ki posts</a><a href="/search">Search</a><a href="${WA_CH}" rel="noopener">WhatsApp channel</a><a href="${YT}" rel="noopener">YouTube</a><a href="${IG}" rel="noopener">Instagram</a><a href="${TT}" rel="noopener">TikTok</a><a href="${FB}" rel="noopener">Facebook</a></nav>
+<p>Classical kalaam un shayar ka hai jin ka intiqaal 50 saal se zyada pehle hua (public domain). Ramz E Zindagi ki apni lines © Ramz E Zindagi. Kisi ghalti ki nishandahi ke liye: ${esc(MAIL)}</p></div></footer>
 <script src="/assets/site.js?v=5" defer></script></body></html>`;
 }
 const crumbs = (items) => `<nav class="crumbs" aria-label="Breadcrumb">${items.map(([h, l], i) => (h ? `<a href="${h}">${esc(l)}</a>` : `<span>${esc(l)}</span>`) + (i < items.length - 1 ? ' <span>›</span>' : '')).join(' ')}</nav>`;
@@ -175,16 +242,16 @@ async function homePage(env, o) {
 ${daily.length ? `<section class="s daily"><div class="wrap"><div class="sh"><h2>روز کا کلام<small>Roz ka sher — Ramz ki taraf se</small></h2><a class="more" href="/daily">Sab dekhein →</a></div><div class="grid two">${daily.slice(0, 4).map((p) => kvCard(p, poets)).join('')}</div></div></section>` : ''}
 
 <section class="s"><div class="wrap"><div class="sh"><h2>ساتھ چلیے<small>Follow Ramz E Zindagi</small></h2></div>${followHtml()}</div></section>`;
-  const ld = { '@context': 'https://schema.org', '@type': 'WebSite', name: 'Ramz E Zindagi', alternateName: 'رمزِ زندگی', url: SITE + '/', inLanguage: 'ur', potentialAction: { '@type': 'SearchAction', target: SITE + '/search?q={search_term_string}', 'query-input': 'required name=search_term_string' }, sameAs: [IG, 'https://www.youtube.com/@ramz.e.zindagi', 'https://www.tiktok.com/@ramz.e.zindagi'] };
+  const ld = { '@context': 'https://schema.org', '@type': 'WebSite', name: 'Ramz E Zindagi', alternateName: 'رمزِ زندگی', url: SITE + '/', inLanguage: 'ur', potentialAction: { '@type': 'SearchAction', target: SITE + '/search?q={search_term_string}', 'query-input': 'required name=search_term_string' }, sameAs: [IG, YT, TT, FB] };
   return html(layout({ body, canonical: SITE + '/', jsonld: ld, current: '/' }), 200, 'public, max-age=300, s-maxage=600');
 }
 const poetCard = (p) => `<a class="poet" href="/shayar/${p.slug}"><span class="yrs">${p.born ? p.born + '–' + p.died : ''}</span><div class="u">${esc(p.ur)}</div><div class="e">${esc(p.en)}</div><div class="n">${p.shers ? p.shers.toLocaleString('en') + ' ashaar' : 'Ramz ki posts'}</div></a>`;
 const postCard = (p) => `<a class="post" href="/ramz/${p.slug}"><img src="/posts/${p.img}" alt="${esc(p.ur.join(' / '))}" loading="lazy" width="900" height="1125"><div class="cap"><b>${esc(p.hook)}</b><time>${esc(fmtDate(p.date))}</time></div></a>`;
 function followHtml() {
   const s = [[WA_CH, 'WhatsApp channel', 'Roz ka sher', '<svg viewBox="0 0 24 24"><path d="M12 2a9.9 9.9 0 0 0-8.5 15l-1.4 5 5.2-1.4A10 10 0 1 0 12 2Zm0 18.2c-1.5 0-3-.4-4.3-1.2l-.3-.2-3.1.8.8-3-.2-.3A8.2 8.2 0 1 1 12 20.2Z"/></svg>'], [IG, 'Instagram', '@ramz.e.zindagi', '<svg viewBox="0 0 24 24"><path d="M7 2h10a5 5 0 0 1 5 5v10a5 5 0 0 1-5 5H7a5 5 0 0 1-5-5V7a5 5 0 0 1 5-5zm0 2a3 3 0 0 0-3 3v10a3 3 0 0 0 3 3h10a3 3 0 0 0 3-3V7a3 3 0 0 0-3-3H7zm5 3.5a4.5 4.5 0 1 1 0 9 4.5 4.5 0 0 1 0-9zm0 2a2.5 2.5 0 1 0 0 5 2.5 2.5 0 0 0 0-5zM17.5 6a1 1 0 1 1 0 2 1 1 0 0 1 0-2z"/></svg>'],
-    ['https://www.youtube.com/@ramz.e.zindagi?sub_confirmation=1', 'YouTube', 'Lambi ghazlein', '<svg viewBox="0 0 24 24"><path d="M22 8.2a3 3 0 0 0-2.1-2.1C18 5.6 12 5.6 12 5.6s-6 0-7.9.5A3 3 0 0 0 2 8.2 31 31 0 0 0 1.6 12 31 31 0 0 0 2 15.8a3 3 0 0 0 2.1 2.1c1.9.5 7.9.5 7.9.5s6 0 7.9-.5a3 3 0 0 0 2.1-2.1 31 31 0 0 0 .4-3.8 31 31 0 0 0-.4-3.8zM10 15V9l5.2 3L10 15z"/></svg>'],
-    ['https://www.tiktok.com/@ramz.e.zindagi', 'TikTok', '@ramz.e.zindagi', '<svg viewBox="0 0 24 24"><path d="M16 2c.3 2.4 1.8 4 4 4.2V9a7 7 0 0 1-4-1.3V15a6 6 0 1 1-6-6v3a3 3 0 1 0 3 3V2h3z"/></svg>'],
-    ['https://www.facebook.com/profile.php?id=61596536855182', 'Facebook', 'Ramz E Zindagi', '<svg viewBox="0 0 24 24"><path d="M14 8h3V4h-3a4 4 0 0 0-4 4v2H7v4h3v8h4v-8h3l1-4h-4V8z"/></svg>']];
+    [YT_SUB, 'YouTube', 'Lambi ghazlein', '<svg viewBox="0 0 24 24"><path d="M22 8.2a3 3 0 0 0-2.1-2.1C18 5.6 12 5.6 12 5.6s-6 0-7.9.5A3 3 0 0 0 2 8.2 31 31 0 0 0 1.6 12 31 31 0 0 0 2 15.8a3 3 0 0 0 2.1 2.1c1.9.5 7.9.5 7.9.5s6 0 7.9-.5a3 3 0 0 0 2.1-2.1 31 31 0 0 0 .4-3.8 31 31 0 0 0-.4-3.8zM10 15V9l5.2 3L10 15z"/></svg>'],
+    [TT, 'TikTok', '@ramz.e.zindagi', '<svg viewBox="0 0 24 24"><path d="M16 2c.3 2.4 1.8 4 4 4.2V9a7 7 0 0 1-4-1.3V15a6 6 0 1 1-6-6v3a3 3 0 1 0 3 3V2h3z"/></svg>'],
+    [FB, 'Facebook', 'Ramz E Zindagi', '<svg viewBox="0 0 24 24"><path d="M14 8h3V4h-3a4 4 0 0 0-4 4v2H7v4h3v8h4v-8h3l1-4h-4V8z"/></svg>']];
   return `<div class="follow">${s.map(([h, n, d, i]) => `<a href="${h}" rel="noopener" target="_blank">${i}<div><span>${n}</span><small>${d}</small></div></a>`).join('')}</div>`;
 }
 
@@ -379,26 +446,110 @@ async function randomSher(env, o) {
 const notFound = () => html(layout({ title: 'Nahi mila', noindex: true, body: `<section class="s"><div class="wrap empty"><p class="u">یہ صفحہ نہیں ملا</p><p>Shayad link ghalat hai. <a href="/" style="color:var(--moon)">Home par jayein</a> ya <a href="/random" style="color:var(--moon)">koi sher parhein</a>.</p></div></section>` }), 404, 'no-store');
 
 /* ---------- admin api ---------- */
-async function api(req, env, path, url) {
+const RESET_TO = 'ramz.e.zindagi@gmail.com'; // the reset code always goes here (fixed in the mailer too)
+const okUser = (u) => /^[a-zA-Z0-9._-]{3,40}$/.test(u);
+const okPass = (p) => typeof p === 'string' && p.length >= 8 && p.length <= 128;
+const okUrl = (u) => /^https:\/\/[^\s"'<>]+$/.test(u);
+async function lockState(env) { const l = (await env.RAMZ_KV.get('lock', 'json')) || { fails: 0, until: 0 }; return l; }
+async function api(req, env, path, url, ctx) {
   const method = req.method; const o = url.origin;
   if (path === '/api/search') return searchApi(env, o, (url.searchParams.get('q') || '').slice(0, 80));
   if (path === '/api/shers') return shersApi(env, o, (url.searchParams.get('ids') || '').split(',').filter(Boolean));
   if (path === '/api/poems' && method === 'GET') return json({ poems: published(await loadKV(env)).slice(0, 60).map(publicPoem) }, 200, { 'cache-control': 'public, max-age=60' });
-  if (path === '/api/admin/status') return json({ ready: !!(env.RAMZ_KV && env.ADMIN_PASSWORD), kv: !!env.RAMZ_KV, password: !!env.ADMIN_PASSWORD, admin: await isAdmin(req, env), today: today() });
-  if (path === '/api/admin/login' && method === 'POST') {
-    if (!env.ADMIN_PASSWORD) return json({ error: 'The admin password is not set yet in Cloudflare.' }, 503);
-    const body = await req.json().catch(() => ({}));
-    if (!safeEqual(String(body.password || ''), env.ADMIN_PASSWORD)) { await new Promise((r) => setTimeout(r, 800)); return json({ error: 'Wrong password.' }, 401); }
-    return json({ ok: true }, 200, { 'set-cookie': cookie(await makeToken(env), SESSION_DAYS * 86400) });
-  }
-  if (path === '/api/admin/logout') return json({ ok: true }, 200, { 'set-cookie': cookie('', 0) });
   if (!path.startsWith('/api/admin/')) return json({ error: 'Not found' }, 404);
   if (!env.RAMZ_KV) return json({ error: 'Storage (RAMZ_KV) is not connected yet.' }, 503);
-  if (!(await isAdmin(req, env))) return json({ error: 'Please log in.' }, 401);
+  const body = method === 'POST' ? await req.json().catch(() => ({})) : {};
+  const auth = await getAuth(env);
+
+  if (path === '/api/admin/status') {
+    const admin = await isAdmin(req, env, ctx); const mailer = !!(await env.RAMZ_KV.get('mailer'));
+    return json({ ready: !!(auth || env.ADMIN_PASSWORD), kv: true, password: !!(auth || env.ADMIN_PASSWORD), admin, user: admin ? (auth ? auth.user : 'admin') : undefined, setup: !auth, mailer, resetTo: maskEmail(RESET_TO), today: today() });
+  }
+  if (path === '/api/admin/login' && method === 'POST') {
+    if (!auth && !env.ADMIN_PASSWORD) return json({ error: 'The admin login is not set up yet.' }, 503);
+    const lock = await lockState(env);
+    if (lock.until > Date.now()) return json({ error: `Too many wrong tries. Try again in ${Math.ceil((lock.until - Date.now()) / 60000)} min.`, locked: true }, 429);
+    const user = clean(body.username, 40);
+    const userOk = auth ? user.toLowerCase() === auth.user.toLowerCase() : user.toLowerCase() === 'admin';
+    const passOk = await checkPassword(env, auth, body.password);
+    if (!(userOk && passOk)) {
+      const fails = (lock.until && lock.until <= Date.now() ? 0 : lock.fails) + 1;
+      const next = fails >= MAX_FAILS ? { fails: 0, until: Date.now() + LOCK_MIN * 60e3 } : { fails, until: 0 };
+      await env.RAMZ_KV.put('lock', JSON.stringify(next), { expirationTtl: 86400 });
+      await new Promise((r) => setTimeout(r, 600));
+      if (next.until) return json({ error: `Too many wrong tries. Login is locked for ${LOCK_MIN} minutes.`, locked: true }, 429);
+      return json({ error: `Wrong username or password. ${MAX_FAILS - fails} ${MAX_FAILS - fails === 1 ? 'try' : 'tries'} left.` }, 401);
+    }
+    await env.RAMZ_KV.delete('lock');
+    ctx.cookies.push(await newSession(env, !!body.remember));
+    return json({ ok: true, setup: !auth });
+  }
+  if (path === '/api/admin/logout') {
+    const t = readCookie(req, SCOOKIE); if (t && /^[0-9a-f]{64}$/.test(t)) await env.RAMZ_KV.delete('sess:' + (await sha(t)));
+    ctx.cookies.push(...clearCookies); return json({ ok: true });
+  }
+  if (path === '/api/admin/forgot' && method === 'POST') {
+    if (!auth) return json({ error: 'Set a username and password first (log in once, then open Account).' }, 400);
+    const r = (await env.RAMZ_KV.get('reset', 'json')) || {};
+    const hourAgo = Date.now() - 3600e3; const sent = (r.sent || []).filter((t) => t > hourAgo);
+    if (sent.length && Date.now() - sent[sent.length - 1] < 60e3) return json({ error: 'A code was just sent. Please wait one minute before asking again.' }, 429);
+    if (sent.length >= 5) return json({ error: 'Too many codes asked this hour. Please try again later.' }, 429);
+    const code = String(100000 + (crypto.getRandomValues(new Uint32Array(1))[0] % 900000));
+    if (!(await sendCode(env, code))) return json({ error: 'The reset email could not be sent right now. Please try again in a few minutes.' }, 502);
+    sent.push(Date.now());
+    await env.RAMZ_KV.put('reset', JSON.stringify({ code: await sha('code|' + code), exp: Date.now() + CODE_MIN * 60e3, tries: 0, sent }), { expirationTtl: 3600 });
+    return json({ ok: true, to: maskEmail(RESET_TO), mins: CODE_MIN });
+  }
+  if (path === '/api/admin/reset' && method === 'POST') {
+    const r = await env.RAMZ_KV.get('reset', 'json');
+    if (!auth || !r || !r.code || r.exp < Date.now()) return json({ error: 'This code has expired. Please ask for a new one.' }, 400);
+    if (r.tries >= 5) return json({ error: 'Too many wrong codes. Please ask for a new one.' }, 429);
+    if (!safeEqual(await sha('code|' + clean(body.code, 6)), r.code)) {
+      await env.RAMZ_KV.put('reset', JSON.stringify({ ...r, tries: r.tries + 1 }), { expirationTtl: 3600 });
+      return json({ error: `Wrong code. ${4 - r.tries} ${4 - r.tries === 1 ? 'try' : 'tries'} left.` }, 400);
+    }
+    if (!okPass(body.password)) return json({ error: 'The new password needs at least 8 characters.' }, 400);
+    await env.RAMZ_KV.put('auth', JSON.stringify({ ...(await makeAuth(auth.user, body.password)), legacyOff: true }));
+    await env.RAMZ_KV.put('reset', JSON.stringify({ sent: r.sent || [] }), { expirationTtl: 3600 });
+    await env.RAMZ_KV.delete('lock'); await dropSessions(env);
+    return json({ ok: true, user: auth.user });
+  }
+
+  if (!(await isAdmin(req, env, ctx))) return json({ error: 'Please log in.' }, 401);
+
+  if (path === '/api/admin/account' && method === 'POST') {
+    if (!(await checkPassword(env, auth, body.current))) return json({ error: 'Your current password is wrong.' }, 400);
+    const user = clean(body.username, 40) || (auth ? auth.user : '');
+    if (!okUser(user)) return json({ error: 'Username: 3–40 letters, numbers, dot, dash or underscore.' }, 400);
+    const pass = body.password ? String(body.password) : '';
+    if (!auth && !pass) return json({ error: 'Please choose a new password.' }, 400);
+    if (pass && !okPass(pass)) return json({ error: 'The new password needs at least 8 characters.' }, 400);
+    const next = pass ? await makeAuth(user, pass) : { ...auth, user, updated: new Date().toISOString() };
+    next.legacyOff = true;
+    await env.RAMZ_KV.put('auth', JSON.stringify(next));
+    if (pass) await dropSessions(env, readCookie(req, SCOOKIE)); // log out every other device
+    return json({ ok: true, user });
+  }
+  if (path === '/api/admin/settings') {
+    const cur = { ...DEFAULTS, ...((await env.RAMZ_KV.get('settings', 'json')) || {}) };
+    if (method === 'GET') return json({ settings: cur, defaults: DEFAULTS });
+    const next = {};
+    for (const k of ['wa', 'ig', 'yt', 'tt', 'fb']) { const v = clean(body[k], 300) || DEFAULTS[k]; if (!okUrl(v)) return json({ error: 'Every link must start with https://' }, 400); next[k] = v; }
+    next.email = clean(body.email, 120) || DEFAULTS.email; if (!/^[^\s@]+@[^\s@]+\.[^\s@]+$/.test(next.email)) return json({ error: 'Please write a valid email.' }, 400);
+    await env.RAMZ_KV.put('settings', JSON.stringify(next)); setAt = 0;
+    return json({ ok: true, settings: next });
+  }
+  if (path === '/api/admin/mailer' && method === 'POST') {
+    const u = clean(body.url, 300);
+    if (!/^https:\/\/script\.google\.com\/macros\/s\/[\w-]+\/exec$/.test(u)) return json({ error: 'Bad mailer link.' }, 400);
+    await env.RAMZ_KV.put('mailer', JSON.stringify({ url: u })); return json({ ok: true });
+  }
+  if (path === '/api/admin/backup' && method === 'GET') return json({ poems: await loadKV(env), settings: await env.RAMZ_KV.get('settings', 'json'), at: new Date().toISOString() });
+
   const list = await loadKV(env);
   if (path === '/api/admin/poems' && method === 'GET') return json({ poems: list, today: today() });
   if (path === '/api/admin/poem' && method === 'POST') {
-    const b = await req.json().catch(() => ({}));
+    const b = body;
     const id = clean(b.id, 40); let p = id ? list.find((x) => x.id === id) : null;
     if (id && !p) return json({ error: 'Poem not found.' }, 404);
     const text = clean(b.text, 3000); if (!text) return json({ error: 'Please write the poetry.' }, 400);
@@ -408,7 +559,7 @@ async function api(req, env, path, url) {
     await saveKV(env, list); return json({ ok: true, poem: p });
   }
   if (path === '/api/admin/action' && method === 'POST') {
-    const b = await req.json().catch(() => ({}));
+    const b = body;
     const i = list.findIndex((x) => x.id === b.id); if (i < 0) return json({ error: 'Not found.' }, 404);
     if (b.op === 'delete') list.splice(i, 1); else if (b.op === 'toggle') list[i].show = !list[i].show; else return json({ error: 'Bad action.' }, 400);
     await saveKV(env, list); return json({ ok: true });
@@ -422,9 +573,10 @@ export default {
     const url = new URL(req.url); const path = url.pathname.replace(/\/+$/, '') || '/'; const o = url.origin;
     const page = Math.max(1, parseInt(url.searchParams.get('page') || '1', 10) || 1);
     try {
-      if (path.startsWith('/api/')) return await api(req, env, path, url);
+      await loadSettings(env);
+      if (path.startsWith('/api/')) { const ctx = { cookies: [] }; const r = await api(req, env, path, url, ctx); for (const c of ctx.cookies) r.headers.append('set-cookie', c); return r; }
       if (path === '/admin') {
-        if (url.searchParams.has('sso')) { const ok = await ssoOk(url, env); return new Response(null, { status: 302, headers: { Location: '/admin', 'Cache-Control': 'no-store', ...(ok ? { 'Set-Cookie': cookie(await makeToken(env), SESSION_DAYS * 86400) } : {}) } }); }
+        if (url.searchParams.has('sso')) { const ok = await ssoOk(url, env); return new Response(null, { status: 302, headers: { Location: '/admin', 'Cache-Control': 'no-store', ...(ok ? { 'Set-Cookie': await newSession(env, true) } : {}) } }); }
         const r = await env.ASSETS.fetch(new Request(new URL('/admin', url), req)); const h = new Headers(r.headers); h.set('x-robots-tag', 'noindex, nofollow'); h.set('cache-control', 'no-store');
         return new Response(r.body, { status: r.status, headers: h });
       }
